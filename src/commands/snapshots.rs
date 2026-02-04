@@ -1,4 +1,4 @@
-//! `smapshot` subcommand
+//! `snapshot` subcommand
 
 use crate::{
     Application, RUSTIC_APP,
@@ -11,9 +11,11 @@ use abscissa_core::{Command, Runnable, Shutdown};
 use anyhow::Result;
 use comfy_table::Cell;
 use derive_more::From;
-use humantime::format_duration;
 use itertools::Itertools;
+use jiff::SignedDuration;
 use serde::Serialize;
+use std::io::Write;    // [FIXED] Keep this for Write trait
+use std::path::PathBuf;
 
 use rustic_core::{
     Progress, ProgressBars, SnapshotGroup,
@@ -27,6 +29,8 @@ use crate::commands::tui;
 #[derive(clap::Parser, Command, Debug)]
 pub(crate) struct SnapshotCmd {
     /// Snapshots to show. If none is given, use filter options to filter from all snapshots
+    ///
+    /// Snapshots can be identified the following ways: "01a2b3c4" or "latest" or "latest~N" (N >= 0)
     #[clap(value_name = "ID")]
     ids: Vec<String>,
 
@@ -38,8 +42,16 @@ pub(crate) struct SnapshotCmd {
     #[clap(long, conflicts_with = "long")]
     json: bool,
 
+    /// Show snapshots in sql format (SQLite/Android Room compatible)
+    #[clap(long, conflicts_with_all = &["long", "json", "all"])]
+    sql: bool,
+
+    /// SQLite database output path (optional, defaults to stdout)
+    #[clap(long, value_name = "PATH", requires = "sql")]
+    sql_output: Option<PathBuf>,
+
     /// Show all snapshots instead of summarizing identical follow-up snapshots
-    #[clap(long, conflicts_with_all = &["long", "json"])]
+    #[clap(long, conflicts_with_all = &["long", "json", "sql"])]
     all: bool,
 
     #[cfg(feature = "tui")]
@@ -102,50 +114,26 @@ impl SnapshotCmd {
             return Ok(());
         }
 
+        // --- Start of SQL Modification ---
+        if self.sql {
+            if let Some(output_path) = &self.sql_output {
+                let mut file = std::fs::File::create(output_path)?;
+                write_snapshots_as_sql(&groups, &mut file)?;
+            } else {
+                let mut stdout = std::io::stdout();
+                write_snapshots_as_sql(&groups, &mut stdout)?;
+            }
+            return Ok(());
+        }
+        // --- End of SQL Modification ---
+
         let mut total_count = 0;
         for (group_key, snapshots) in groups {
             if !group_key.is_empty() {
                 println!("\nsnapshots for {group_key}");
             }
-            let count = snapshots.len();
-
-            if self.long {
-                for snap in snapshots {
-                    let mut table = table();
-
-                    let add_entry = |title: &str, value: String| {
-                        _ = table.add_row([bold_cell(title), Cell::new(value)]);
-                    };
-                    fill_table(&snap, add_entry);
-
-                    println!("{table}");
-                    println!();
-                }
-            } else {
-                let mut table = table_right_from(
-                    6,
-                    [
-                        "ID", "Time", "Host", "Label", "Tags", "Paths", "Files", "Dirs", "Size",
-                    ],
-                );
-
-                if self.all {
-                    // Add all snapshots to output table
-                    _ = table.add_rows(snapshots.into_iter().map(|sn| snap_to_table(&sn, 0)));
-                } else {
-                    // Group snapshts by treeid and output into table
-                    _ = table.add_rows(
-                        snapshots
-                            .into_iter()
-                            .chunk_by(|sn| sn.tree)
-                            .into_iter()
-                            .map(|(_, mut g)| snap_to_table(&g.next().unwrap(), g.count())),
-                    );
-                }
-                println!("{table}");
-            }
-            println!("{count} snapshot(s)");
-            total_count += count;
+            total_count += snapshots.len();
+            print_snapshots(snapshots, self.long, self.all);
         }
         println!();
         println!("total: {total_count} snapshot(s)");
@@ -154,10 +142,223 @@ impl SnapshotCmd {
     }
 }
 
+// --- Helper Functions for SQL Output ---
+
+fn sql_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "''")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace('\0', "\\0")
+}
+
+fn sql_quote_str(opt: &Option<String>) -> String {
+    match opt {
+        Some(s) => format!("'{}'", sql_escape(s)),
+        None => "NULL".to_string(),
+    }
+}
+
+// [FIXED] Changed trait bound from std::io::Write to Write (already imported)
+pub fn write_snapshots_as_sql<W: Write>(
+    groups: &[(SnapshotGroup, Vec<SnapshotFile>)],
+    writer: &mut W,
+) -> Result<()> {
+    // 强制开启外键支持，包装原子事务
+    writeln!(writer, "PRAGMA foreign_keys = ON;")?;
+    writeln!(writer, "BEGIN TRANSACTION;")?;
+
+    // 1. snapshots 表：包含所有基础元数据
+    writeln!(writer,
+             "CREATE TABLE IF NOT EXISTS snapshots (
+            id TEXT PRIMARY KEY NOT NULL,
+            time TEXT NOT NULL,
+            program_version TEXT NOT NULL,
+            parent TEXT,
+            tree TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            username TEXT NOT NULL,
+            uid INTEGER NOT NULL,
+            gid INTEGER NOT NULL,
+            original TEXT,
+            label TEXT NOT NULL,
+            description TEXT,
+            delete_condition TEXT NOT NULL DEFAULT 'not set'
+        );")?;
+
+    // 2. snapshot_paths & snapshot_tags：处理数组字段（开发者最易查询的结构）
+    writeln!(writer, "CREATE TABLE IF NOT EXISTS snapshot_paths (snapshot_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (snapshot_id, path), FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
+    writeln!(writer, "CREATE TABLE IF NOT EXISTS snapshot_tags (snapshot_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY (snapshot_id, tag), FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE) WITHOUT ROWID;")?;
+
+    // 3. snapshot_summaries：包含 JSON 中 summary 对象的所有 23 个字段
+    writeln!(writer,
+             "CREATE TABLE IF NOT EXISTS snapshot_summaries (
+            snapshot_id TEXT PRIMARY KEY NOT NULL,
+            files_new INTEGER NOT NULL,
+            files_changed INTEGER NOT NULL,
+            files_unmodified INTEGER NOT NULL,
+            total_files_processed INTEGER NOT NULL,
+            total_bytes_processed INTEGER NOT NULL,
+            dirs_new INTEGER NOT NULL,
+            dirs_changed INTEGER NOT NULL,
+            dirs_unmodified INTEGER NOT NULL,
+            total_dirs_processed INTEGER NOT NULL,
+            total_dirsize_processed INTEGER NOT NULL,
+            data_blobs INTEGER NOT NULL,
+            tree_blobs INTEGER NOT NULL,
+            data_added INTEGER NOT NULL,
+            data_added_packed INTEGER NOT NULL,
+            data_added_files INTEGER NOT NULL,
+            data_added_files_packed INTEGER NOT NULL,
+            data_added_trees INTEGER NOT NULL,
+            data_added_trees_packed INTEGER NOT NULL,
+            command TEXT NOT NULL,
+            backup_start TEXT NOT NULL,
+            backup_end TEXT NOT NULL,
+            backup_duration REAL NOT NULL,
+            total_duration REAL NOT NULL,
+            FOREIGN KEY(snapshot_id) REFERENCES snapshots(id) ON DELETE CASCADE
+        );")?;
+
+    for (_, snapshots) in groups {
+        for snap in snapshots {
+            let id = snap.id.to_hex().to_string();
+
+            // 基础信息插入
+            writeln!(writer,
+                     "INSERT OR REPLACE INTO snapshots VALUES ('{}', '{}', '{}', {}, '{}', '{}', '{}', {}, {}, {}, '{}', {}, '{}');",
+                     id,
+                     snap.time.to_string(),
+                     sql_escape(&snap.program_version),
+                     // [FIXED] 增加了 .to_string() 确保 HexId 能转换
+                     snap.parent.map(|p| format!("'{}'", p.to_hex().to_string())).unwrap_or_else(|| "NULL".into()),
+                     snap.tree.to_hex().to_string(),
+                     sql_escape(&snap.hostname),
+                     sql_escape(&snap.username),
+                     snap.uid,
+                     snap.gid,
+                     // [FIXED] 增加了 .to_string()
+                     snap.original.map(|o| format!("'{}'", o.to_hex().to_string())).unwrap_or_else(|| "NULL".into()),
+                     sql_escape(&snap.label),
+                     sql_quote_str(&snap.description),
+                     match &snap.delete {
+                         DeleteOption::NotSet => "not set",
+                         DeleteOption::Never => "never",
+                         DeleteOption::After(_) => "after",
+                     }
+            )?;
+
+            // 数组字段
+            for path in &snap.paths {
+                writeln!(writer, "INSERT OR IGNORE INTO snapshot_paths VALUES ('{}', '{}');", id, sql_escape(path))?;
+            }
+            for tag in &snap.tags {
+                writeln!(writer, "INSERT OR IGNORE INTO snapshot_tags VALUES ('{}', '{}');", id, sql_escape(tag))?;
+            }
+
+            // Summary 字段插入
+            if let Some(s) = &snap.summary {
+                writeln!(writer,
+                         "INSERT OR REPLACE INTO snapshot_summaries VALUES ('{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}', '{}', '{}', {}, {});",
+                         id,
+                         s.files_new,
+                         s.files_changed,
+                         s.files_unmodified,
+                         s.total_files_processed,
+                         s.total_bytes_processed,
+                         s.dirs_new,
+                         s.dirs_changed,
+                         s.dirs_unmodified,
+                         s.total_dirs_processed,
+                         s.total_dirsize_processed,
+                         s.data_blobs,
+                         s.tree_blobs,
+                         s.data_added,
+                         s.data_added_packed,
+                         s.data_added_files,
+                         s.data_added_files_packed,
+                         s.data_added_trees,
+                         s.data_added_trees_packed,
+                         sql_escape(&s.command),
+                         s.backup_start.to_string(),
+                         s.backup_end.to_string(),
+                         s.backup_duration,
+                         s.total_duration
+                )?;
+            }
+        }
+    }
+
+    writeln!(writer,
+             "CREATE VIEW IF NOT EXISTS v_snapshots_full AS
+        SELECT
+            s.*,
+            (SELECT group_concat(tag, char(31)) FROM snapshot_tags WHERE snapshot_id = s.id) AS tags_flat,
+            (SELECT group_concat(path, char(31)) FROM snapshot_paths WHERE snapshot_id = s.id) AS paths_flat,
+            sum.files_new, sum.files_changed, sum.files_unmodified,
+            sum.total_files_processed, sum.total_bytes_processed,
+            sum.dirs_new, sum.dirs_changed, sum.dirs_unmodified,
+            sum.total_dirs_processed, sum.total_dirsize_processed,
+            sum.data_blobs, sum.tree_blobs,
+            sum.data_added, sum.data_added_packed,
+            sum.data_added_files, sum.data_added_files_packed,
+            sum.data_added_trees, sum.data_added_trees_packed,
+            sum.command, sum.backup_start, sum.backup_end,
+            sum.backup_duration, sum.total_duration
+        FROM snapshots s
+        LEFT JOIN snapshot_summaries sum ON s.id = sum.snapshot_id;")?;
+
+    writeln!(writer, "COMMIT;")?;
+    Ok(())
+}
+// --- Existing Output Logic ---
+
+pub fn print_snapshots(snapshots: Vec<SnapshotFile>, long: bool, all: bool) {
+    let count = snapshots.len();
+    if long {
+        for snap in snapshots {
+            let mut table = table();
+
+            let add_entry = |title: &str, value: String| {
+                _ = table.add_row([bold_cell(title), Cell::new(value)]);
+            };
+            fill_table(&snap, add_entry);
+
+            println!("{table}");
+            println!();
+        }
+    } else {
+        let mut table = table_right_from(
+            6,
+            [
+                "ID", "Time", "Host", "Label", "Tags", "Paths", "Files", "Dirs", "Size",
+            ],
+        );
+
+        if all {
+            // Add all snapshots to output table
+            _ = table.add_rows(snapshots.into_iter().map(|sn| snap_to_table(&sn, 0)));
+        } else {
+            // Group snapshts by treeid and output into table
+            _ = table.add_rows(
+                snapshots
+                    .into_iter()
+                    .chunk_by(|sn| sn.tree)
+                    .into_iter()
+                    .map(|(_, mut g)| snap_to_table(&g.next().unwrap(), g.count())),
+            );
+        }
+        println!("{table}");
+    }
+    println!("{count} snapshot(s)");
+}
+
 pub fn snap_to_table(sn: &SnapshotFile, count: usize) -> [String; 9] {
+    let config = RUSTIC_APP.config();
     let tags = sn.tags.formatln();
     let paths = sn.paths.formatln();
-    let time = sn.time.format("%Y-%m-%d %H:%M:%S");
+    let time = config.global.format_time(&sn.time);
     let (files, dirs, size) = sn.summary.as_ref().map_or_else(
         || ("?".to_string(), "?".to_string(), "?".to_string()),
         |s| {
@@ -186,6 +387,7 @@ pub fn snap_to_table(sn: &SnapshotFile, count: usize) -> [String; 9] {
 }
 
 pub fn fill_table(snap: &SnapshotFile, mut add_entry: impl FnMut(&str, String)) {
+    let config = RUSTIC_APP.config();
     add_entry("Snapshot", snap.id.to_hex().to_string());
     // note that if original was not set, it is set to snap.id by the load process
     if let Some(original) = snap.original {
@@ -193,15 +395,15 @@ pub fn fill_table(snap: &SnapshotFile, mut add_entry: impl FnMut(&str, String)) 
             add_entry("Original ID", original.to_hex().to_string());
         }
     }
-    add_entry("Time", snap.time.format("%Y-%m-%d %H:%M:%S").to_string());
+    add_entry("Time", config.global.format_time(&snap.time).to_string());
     add_entry("Generated by", snap.program_version.clone());
     add_entry("Host", snap.hostname.clone());
     add_entry("Label", snap.label.clone());
     add_entry("Tags", snap.tags.formatln());
-    let delete = match snap.delete {
+    let delete = match &snap.delete {
         DeleteOption::NotSet => "not set".to_string(),
         DeleteOption::Never => "never".to_string(),
-        DeleteOption::After(t) => format!("after {}", t.format("%Y-%m-%d %H:%M:%S")),
+        DeleteOption::After(t) => format!("after {}", config.global.format_time(t)),
     };
     add_entry("Delete", delete);
     add_entry("Paths", snap.paths.formatln());
@@ -253,12 +455,12 @@ pub fn fill_table(snap: &SnapshotFile, mut add_entry: impl FnMut(&str, String)) 
         add_entry("Added to repo", written);
 
         let duration = format!(
-            "backup start: {} / backup end: {} / backup duration: {}\n\
-            total duration: {}",
-            summary.backup_start.format("%Y-%m-%d %H:%M:%S"),
-            summary.backup_end.format("%Y-%m-%d %H:%M:%S"),
-            format_duration(std::time::Duration::from_secs_f64(summary.backup_duration)),
-            format_duration(std::time::Duration::from_secs_f64(summary.total_duration))
+            "backup start: {} / backup end: {} / backup duration: {:#}\n\
+            total duration: {:#}",
+            config.global.format_time(&summary.backup_start),
+            config.global.format_time(&summary.backup_end),
+            SignedDuration::from_secs_f64(summary.backup_duration),
+            SignedDuration::from_secs_f64(summary.total_duration),
         );
         add_entry("Duration", duration);
     }

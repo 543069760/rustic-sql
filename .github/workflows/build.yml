@@ -1,0 +1,175 @@
+name: Build Rustic-Sql
+
+on:
+  workflow_dispatch:
+    inputs:
+      rustic_version:
+        description: 'Rustic 版本号 (例如: 0.10.3)'
+        required: true
+        default: '0.10.3'
+      build_android:
+        description: '是否构建 Android'
+        required: true
+        type: boolean
+        default: true
+      build_linux:
+        description: '是否构建 Linux'
+        required: true
+        type: boolean
+        default: false
+      build_windows:
+        description: '是否构建 Windows'
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build-android:
+    if: github.event.inputs.build_android == 'true'
+    name: build-android (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            rust_target: aarch64-linux-android
+            ndk_target: aarch64-linux-android
+          - arch: armv7
+            rust_target: armv7-linux-androideabi
+            ndk_target: armv7a-linux-androideabi
+
+    steps:
+      - name: Checkout Rustic
+        uses: actions/checkout@v4
+        with:
+          repository: 543069760/rustic
+          ref: main
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build Binary
+        env:
+          ANDROID_API: 24
+        run: |
+          set -euo pipefail
+
+          # 1. 定位工具链
+          NDK_DIR="${ANDROID_NDK_LATEST_HOME}"
+          TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
+          TARGET_UPPER=$(echo ${{ matrix.rust_target }} | tr '[:lower:]' '[:upper:]' | tr '-' '_')
+          CLANG_BIN="$TOOLCHAIN/bin/${{ matrix.ndk_target }}${ANDROID_API}-clang"
+          AR_BIN="$TOOLCHAIN/bin/llvm-ar"
+
+          # 2. 注入环境变量
+          export "CC_$TARGET_UPPER=$CLANG_BIN"
+          export "AR_$TARGET_UPPER=$AR_BIN"
+          export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$CLANG_BIN"
+          export CC="$CLANG_BIN"
+          export AR="$AR_BIN"
+
+          # 3. 针对 armv7 (32位) 的类型兼容性补丁
+          # 3. 针对 armv7 (32位) 的类型兼容性补丁
+          if [[ "${{ matrix.rust_target }}" == *"armv7"* ]]; then
+            echo "Applying precision 32-bit compatibility patch for rustic_core..."
+            cargo fetch --target ${{ matrix.rust_target }}
+          
+            # [修正] 同时搜索 registry 和 git 检出目录，确保能覆盖到所有可能的 rustic_core 位置
+            # 使用 -path 排除掉无关目录提高效率，并直接对 local_destination.rs 进行修改
+            find /home/runner/.cargo -name local_destination.rs -exec \
+              sed -i 's/device)/device as u32)/g' {} +
+          
+            echo "Patch applied successfully."
+          fi
+          cargo build --release --target ${{ matrix.rust_target }} --bin rustic
+          "$TOOLCHAIN/bin/llvm-strip" target/${{ matrix.rust_target }}/release/rustic
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustic-v${{ github.event.inputs.rustic_version }}-${{ matrix.arch }}-android
+          path: target/${{ matrix.rust_target }}/release/rustic
+
+  build-linux:
+    if: github.event.inputs.build_linux == 'true'
+    name: build-linux (${{ matrix.target_name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- x86_64 (64-bit) ---
+          - rust_target: x86_64-unknown-linux-gnu
+            target_name: x64-gnu
+          - rust_target: x86_64-unknown-linux-musl
+            target_name: x64-musl
+          # --- i686 (32-bit) ---
+          - rust_target: i686-unknown-linux-gnu
+            target_name: x86-gnu
+
+    steps:
+      - name: Checkout Rustic
+        uses: actions/checkout@v4
+        with:
+          repository: 543069760/rustic
+          ref: main
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib musl-tools
+
+      - name: Build Binary
+        run: |
+          set -euo pipefail
+          cargo build --release --target ${{ matrix.rust_target }} --bin rustic
+          strip target/${{ matrix.rust_target }}/release/rustic
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustic-v${{ github.event.inputs.rustic_version }}-${{ matrix.target_name }}-linux
+          path: target/${{ matrix.rust_target }}/release/rustic
+
+  build-windows:
+    if: github.event.inputs.build_windows == 'true'
+    name: build-windows (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86
+            rust_target: i686-pc-windows-msvc
+          - arch: x64
+            rust_target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout Rustic
+        uses: actions/checkout@v4
+        with:
+          repository: 543069760/rustic
+          ref: main
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Build Binary
+        run: |
+          cargo build --release --target ${{ matrix.rust_target }} --bin rustic
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustic-v${{ github.event.inputs.rustic_version }}-${{ matrix.arch }}-windows
+          path: target/${{ matrix.rust_target }}/release/rustic.exe
