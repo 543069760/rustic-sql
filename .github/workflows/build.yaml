@@ -43,8 +43,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -76,12 +76,12 @@ jobs:
           if [[ "${{ matrix.rust_target }}" == *"armv7"* ]]; then
             echo "Applying precision 32-bit compatibility patch for rustic_core..."
             cargo fetch --target ${{ matrix.rust_target }}
-            
+          
             # [修正] 同时搜索 registry 和 git 检出目录，确保能覆盖到所有可能的 rustic_core 位置
             # 使用 -path 排除掉无关目录提高效率，并直接对 local_destination.rs 进行修改
             find /home/runner/.cargo -name local_destination.rs -exec \
               sed -i 's/device)/device as u32)/g' {} +
-            
+          
             echo "Patch applied successfully."
           fi
           cargo build --release --target ${{ matrix.rust_target }} --bin rustic
@@ -114,8 +114,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -156,8 +156,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
