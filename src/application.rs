@@ -57,10 +57,6 @@ impl Application for RusticApp {
     /// Paths to resources within the application.
     type Paths = StandardPaths;
 
-    fn version(&self) -> abscissa_core::Version {
-        abscissa_core::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()
-    }
-
     /// Accessor for application configuration.
     fn config(&self) -> config::Reader<RusticConfig> {
         self.config.read()

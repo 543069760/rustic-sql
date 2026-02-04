@@ -170,7 +170,7 @@ fn styles() -> Styles {
 }
 
 fn version() -> &'static str {
-    option_env!("PROJECT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Entry point for the application. It needs to be a struct to allow using subcommands!
