@@ -43,8 +43,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -114,8 +114,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -156,8 +156,8 @@ jobs:
       - name: Checkout Rustic
         uses: actions/checkout@v4
         with:
-          repository: 543069760/rustic
-          ref: main
+          repository: 543069760/rustic-sql
+          ref: v0.10.3-branch
 
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
