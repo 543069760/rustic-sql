@@ -370,7 +370,19 @@ impl BackupCmd {
                 .sanitize()
                 .with_context(|| format!("error sanitizing source=s\"{:?}\"", source))?
                 .merge();
-            Ok(repo.backup(&backup_opts, &source, self.snap_opts.to_snapshot()?)?)
+
+            // 获取 CLI 版本和 rustic_core 版本
+            let cli_version = env!("CARGO_PKG_VERSION");
+            let core_version = "0.9.0"; // 或者从 rustic_core 获取
+            let current_version = format!("rustic {} with core {}", cli_version, core_version);
+
+            // 将转换后的快照选项取出
+            let mut snapshot_file = self.snap_opts.to_snapshot()?;
+            // 强制覆盖 program_version 字段
+            snapshot_file.program_version = current_version;
+
+            // 传入修改后的快照文件对象
+            Ok(repo.backup(&backup_opts, &source, snapshot_file)?)
         })?;
 
         if self.json {
