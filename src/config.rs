@@ -256,6 +256,11 @@ pub struct GlobalOptions {
     #[clap(long, global = true, env = "RUSTIC_OTEL", value_name = "ENDPOINT_URL", value_hint = ValueHint::Url)]
     #[merge(strategy=conflate::option::overwrite_none)]
     pub opentelemetry: Option<Url>,
+
+    /// Instance label for stop file matching
+    #[clap(long, global = true, env = "RUSTIC_INSTANCE_LABEL")]
+    #[merge(strategy=conflate::option::overwrite_none)]
+    pub instance_label: Option<String>,
 }
 
 pub fn parse_labels(s: &str) -> Result<BTreeMap<String, String>> {
