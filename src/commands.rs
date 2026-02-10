@@ -189,48 +189,47 @@ impl Runnable for EntryPoint {
     fn run(&self) {
         setup_panic!();
 
-        // Set up Ctrl-C handler
+        let stop_file = std::env::temp_dir().join(".rustic_stop");
+
+        // 启动时清理残留文件
+        let _ = std::fs::remove_file(&stop_file);
+
         let (tx, rx) = channel();
         ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
             .expect("Error setting Ctrl-C handler");
 
-        // 使用固定的停止文件路径
-        let stop_file = std::env::temp_dir().join(".rustic_stop");
         let stop_file_clone = stop_file.clone();
-
-        // 获取实例标签
         let instance_label = self.config.global.instance_label.clone();
 
         _ = std::thread::spawn(move || {
             loop {
-                // 检查 Ctrl+C 信号
                 if rx.try_recv().is_ok() {
                     info!("Ctrl-C received, shutting down...");
                     RUSTIC_APP.shutdown(Shutdown::Graceful);
                     break;
                 }
 
-                // 检查停止文件
                 if stop_file_clone.exists() {
-                    let should_stop = if let Ok(content) = std::fs::read_to_string(&stop_file_clone) {
-                        let content = content.trim();
-                        // 空文件或 "*" 停止所有实例
-                        if content.is_empty() || content == "*" {
-                            true
-                        } else if let Some(ref label) = instance_label {
-                            // 匹配实例标签
-                            content == label
-                        } else {
-                            // 没有设置实例标签,非空内容不匹配
+                    let should_stop = match std::fs::read_to_string(&stop_file_clone) {
+                        Ok(content) => {
+                            let content = content.trim();
+                            if content.is_empty() || content == "*" {
+                                true
+                            } else if let Some(ref label) = instance_label {
+                                content == label
+                            } else {
+                                false
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Cannot read stop file: {}, removing it", e);
+                            let _ = std::fs::remove_file(&stop_file_clone);
                             false
                         }
-                    } else {
-                        // 无法读取文件,当作空文件处理(停止所有)
-                        true
                     };
 
                     if should_stop {
-                        info!("Stop file detected, shutting down...");
+                        info!("Stop signal received, shutting down...");
                         let _ = std::fs::remove_file(&stop_file_clone);
                         RUSTIC_APP.shutdown(Shutdown::Graceful);
                         break;
@@ -241,7 +240,6 @@ impl Runnable for EntryPoint {
             }
         });
 
-        // Run the subcommand
         self.commands.run();
         RUSTIC_APP.shutdown(Shutdown::Graceful)
     }
