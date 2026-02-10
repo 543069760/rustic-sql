@@ -189,7 +189,9 @@ impl Runnable for EntryPoint {
     fn run(&self) {
         setup_panic!();
 
-        let stop_file = std::env::temp_dir().join(".rustic_stop");
+        let stop_file = self.config.global.stop_file.clone().unwrap_or_else(|| {
+            std::env::temp_dir().join(".rustic_stop")
+        });
 
         // 启动时清理残留文件
         let _ = std::fs::remove_file(&stop_file);

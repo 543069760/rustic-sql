@@ -257,6 +257,11 @@ pub struct GlobalOptions {
     #[merge(strategy=conflate::option::overwrite_none)]
     pub opentelemetry: Option<Url>,
 
+    /// Path to the stop file for graceful shutdown
+    #[clap(long, global = true, env = "RUSTIC_STOP_FILE", value_hint = ValueHint::FilePath)]
+    #[merge(strategy=conflate::option::overwrite_none)]
+    pub stop_file: Option<PathBuf>,
+
     /// Instance label for stop file matching
     #[clap(long, global = true, env = "RUSTIC_INSTANCE_LABEL")]
     #[merge(strategy=conflate::option::overwrite_none)]
