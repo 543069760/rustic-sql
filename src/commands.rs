@@ -67,7 +67,7 @@ use clap::builder::{
 };
 use convert_case::{Case, Casing};
 use human_panic::setup_panic;
-use log::{Level, info, log};
+use log::{Level, info, log, warn};
 use reqwest::Url;
 use simplelog::{CombinedLogger, LevelFilter, TermLogger, TerminalMode, WriteLogger};
 
@@ -206,7 +206,6 @@ impl Runnable for EntryPoint {
                 if rx.try_recv().is_ok() {
                     info!("Ctrl-C received, shutting down...");
                     RUSTIC_APP.shutdown(Shutdown::Graceful);
-                    break;
                 }
 
                 if stop_file_clone.exists() {
@@ -232,7 +231,6 @@ impl Runnable for EntryPoint {
                         info!("Stop signal received, shutting down...");
                         let _ = std::fs::remove_file(&stop_file_clone);
                         RUSTIC_APP.shutdown(Shutdown::Graceful);
-                        break;
                     }
                 }
 
